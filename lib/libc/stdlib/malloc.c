@@ -23,9 +23,10 @@
  * can buy me a beer in return. Poul-Henning Kamp
  */
 
-/* #define MALLOC_STATS */
+#define MALLOC_STATS
 
 #include <sys/types.h>
+#include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
@@ -40,7 +41,8 @@
 
 #ifdef MALLOC_STATS
 #include <sys/tree.h>
-#include <fcntl.h>
+#include <sys/ktrace.h>
+#include <dlfcn.h>
 #endif
 
 #include "thread_private.h"
@@ -112,6 +114,29 @@ struct region_info {
 
 LIST_HEAD(chunk_head, chunk_info);
 
+
+#ifdef MALLOC_STATS
+struct objectnode {
+	RBT_ENTRY(objectnode) entry;
+	char name[100];
+};
+RBT_HEAD(objectshead, objectnode);
+RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
+
+struct stackframe {
+	void *caller;
+	struct objectnode *object;
+};
+
+#define NUM_FRAMES	4
+struct btracenode {
+	RBT_ENTRY(btracenode) entry;
+	struct stackframe backtrace[NUM_FRAMES];
+};
+RBT_HEAD(btraceshead, btracenode);
+RBT_PROTOTYPE(btraceshead, btracenode, entry, btracecmp);
+#endif /* MALLOC_STATS */
+
 struct dir_info {
 	u_int32_t canary1;
 	int active;			/* status of malloc */
@@ -136,6 +161,12 @@ struct dir_info {
 	void *delayed_chunks[MALLOC_DELAYED_CHUNK_MASK + 1];
 	u_char rbytes[32];		/* random bytes */
 #ifdef MALLOC_STATS
+	struct objectshead objects;	/* libs and exec seen */
+	struct btraceshead btraces;	/* libs and exec seen */
+	struct objectnode *objectnodes;
+	size_t objectnodesused;
+	struct btracenode *btracenodes;
+	size_t btracenodesused;
 	size_t inserts;
 	size_t insert_collisions;
 	size_t finds;
@@ -196,6 +227,7 @@ struct malloc_readonly {
 	u_int	chunk_canaries;		/* use canaries after chunks? */
 	int	internal_funcs;		/* use better recallocarray/freezero? */
 	u_int	def_malloc_cache;	/* free pages we cache */
+	int	trace;			/* are we tracing? */
 	size_t	malloc_guard;		/* use guard pages after allocations? */
 #ifdef MALLOC_STATS
 	int	malloc_stats;		/* dump statistics at end */
@@ -216,14 +248,15 @@ static __dead void wrterror(struct dir_info *d, char *msg, ...)
     __attribute__((__format__ (printf, 2, 3)));
 
 #ifdef MALLOC_STATS
-void malloc_dump(int, int, struct dir_info *);
+void malloc_dump(int, struct dir_info *);
 PROTO_NORMAL(malloc_dump);
-void malloc_gdump(int);
+void malloc_gdump(void);
 PROTO_NORMAL(malloc_gdump);
 static void malloc_exit(void);
-#define CALLER	__builtin_return_address(0)
+static void *caller(struct dir_info *);
+#define CALLER(d)	caller(d)
 #else
-#define CALLER	NULL
+#define CALLER(d)	NULL
 #endif
 
 /* low bits of r->p determine size: 0 means >= page size and r->size holding
@@ -292,7 +325,7 @@ wrterror(struct dir_info *d, char *msg, ...)
 
 #ifdef MALLOC_STATS
 	if (mopts.malloc_stats)
-		malloc_gdump(STDERR_FILENO);
+		malloc_gdump();
 #endif /* MALLOC_STATS */
 
 	errno = saved_errno;
@@ -382,6 +415,12 @@ omalloc_parseopt(char opt)
 		break;
 	case 'R':
 		mopts.malloc_realloc = 1;
+		break;
+	case 't':
+		mopts.trace = 0;
+		break;
+	case 'T':
+		mopts.trace++;
 		break;
 	case 'u':
 		mopts.malloc_freeunmap = 0;
@@ -512,6 +551,10 @@ omalloc_poolinit(struct dir_info **dp, int mmap_flag)
 	d->mmap_flag = mmap_flag;
 	d->malloc_junk = mopts.def_malloc_junk;
 	d->malloc_cache = mopts.def_malloc_cache;
+#ifdef MALLOC_STATS
+	RBT_INIT(objectshead, &d->objects);
+	RBT_INIT(btraceshead, &d->btraces);
+#endif
 	d->canary1 = mopts.malloc_canary ^ (u_int32_t)(uintptr_t)d;
 	d->canary2 = ~d->canary1;
 
@@ -1262,7 +1305,7 @@ malloc(size_t size)
 	int saved_errno = errno;
 
 	PROLOGUE(getpool(), "malloc")
-	r = omalloc(d, size, 0, CALLER);
+	r = omalloc(d, size, 0, CALLER(d));
 	EPILOGUE()
 	return r;
 }
@@ -1276,7 +1319,7 @@ malloc_conceal(size_t size)
 	int saved_errno = errno;
 
 	PROLOGUE(mopts.malloc_pool[0], "malloc_conceal")
-	r = omalloc(d, size, 0, CALLER);
+	r = omalloc(d, size, 0, CALLER(d));
 	EPILOGUE()
 	return r;
 }
@@ -1688,7 +1731,7 @@ realloc(void *ptr, size_t size)
 	int saved_errno = errno;
 
 	PROLOGUE(getpool(), "realloc")
-	r = orealloc(&d, ptr, size, CALLER);
+	r = orealloc(&d, ptr, size, CALLER(d));
 	EPILOGUE()
 	return r;
 }
@@ -1719,7 +1762,7 @@ calloc(size_t nmemb, size_t size)
 	}
 
 	size *= nmemb;
-	r = omalloc(d, size, 1, CALLER);
+	r = omalloc(d, size, 1, CALLER(d));
 	EPILOGUE()
 	return r;
 }
@@ -1744,7 +1787,7 @@ calloc_conceal(size_t nmemb, size_t size)
 	}
 
 	size *= nmemb;
-	r = omalloc(d, size, 1, CALLER);
+	r = omalloc(d, size, 1, CALLER(d));
 	EPILOGUE()
 	return r;
 }
@@ -1891,7 +1934,7 @@ recallocarray(void *ptr, size_t oldnmemb, size_t newnmemb, size_t size)
 		oldsize = oldnmemb * size;
 	}
 
-	r = orecallocarray(&d, ptr, oldsize, newsize, CALLER);
+	r = orecallocarray(&d, ptr, oldsize, newsize, CALLER(d));
 	EPILOGUE()
 	return r;
 }
@@ -2014,7 +2057,7 @@ posix_memalign(void **memptr, size_t alignment, size_t size)
 		malloc_recurse(d);
 		goto err;
 	}
-	r = omemalign(d, alignment, size, 0, CALLER);
+	r = omemalign(d, alignment, size, 0, CALLER(d));
 	d->active--;
 	_MALLOC_UNLOCK(d->mutex);
 	if (r == NULL) {
@@ -2052,13 +2095,108 @@ aligned_alloc(size_t alignment, size_t size)
 	}
 
 	PROLOGUE(getpool(), "aligned_alloc")
-	r = omemalign(d, alignment, size, 0, CALLER);
+	r = omemalign(d, alignment, size, 0, CALLER(d));
 	EPILOGUE()
 	return r;
 }
 /*DEF_STRONG(aligned_alloc);*/
 
 #ifdef MALLOC_STATS
+
+static void *
+objectid(struct dir_info *d, const char *name)
+{
+	struct objectnode key, *p;
+
+	if (d->objectnodes == MAP_FAILED)
+		return NULL;
+
+	strlcpy(key.name, name, sizeof(key.name));
+	p = RBT_FIND(objectshead, &d->objects, &key);
+	if (p != NULL)
+		return p;
+
+	if (d->objectnodes == NULL ||
+	    d->objectnodesused >= MALLOC_PAGESIZE / sizeof(struct objectnode)) {
+		d->objectnodes = MMAP(MALLOC_PAGESIZE, 0);
+		if (d->objectnodes == MAP_FAILED)
+			return NULL;
+		d->objectnodesused = 0;
+	}
+	p = &d->objectnodes[d->objectnodesused++];
+	strlcpy(p->name, name, sizeof(p->name));
+	RBT_INSERT(objectshead, &d->objects, p);
+	return p;
+}
+
+static void*
+stackframe(struct dir_info *d, struct stackframe *st, void *caller)
+{
+	Dl_info info;
+
+	st->caller = caller;
+	if (caller && dladdr(caller, &info)) {
+		st->caller -= (uintptr_t)info.dli_fbase;
+		st->object = info.dli_fname ? objectid(d, info.dli_fname) :
+		    NULL;
+	} else
+		st->object = NULL;
+	return caller;
+}
+
+#define FRAME(i) do { \
+	if (i < mopts.trace && f) \
+		f = stackframe(d, &key.backtrace[i], __builtin_return_address(i+1)); \
+	else \
+		memset(&key.backtrace[i], 0, sizeof(key.backtrace[i])); \
+} while (0);
+		
+
+static void*
+caller(struct dir_info *d)
+{
+	void *f = (void *) 1;
+	struct btracenode key, *p;
+
+	if (mopts.trace == 0 || d->btracenodes == MAP_FAILED)
+		return NULL;
+
+	FRAME(0);
+	FRAME(1);
+	FRAME(2);
+	FRAME(3);
+
+	p = RBT_FIND(btraceshead, &d->btraces, &key);
+	if (p != NULL)
+		return p;
+	if (d->btracenodes == NULL ||
+	    d->btracenodesused >= MALLOC_PAGESIZE / sizeof(struct btracenode)) {
+		d->btracenodes = MMAP(MALLOC_PAGESIZE, 0);
+		if (d->btracenodes == MAP_FAILED)
+			return NULL;
+		d->btracenodesused = 0;
+	}
+	p = &d->btracenodes[d->btracenodesused++];
+	memcpy(p->backtrace, key.backtrace, sizeof(p->backtrace));
+	RBT_INSERT(btraceshead, &d->btraces, p);
+	return p;
+}
+
+static int
+objectcmp(const struct objectnode *e1, const struct objectnode *e2)
+{
+	return strcmp(e1->name, e2->name);
+}
+
+static int
+btracecmp(const struct btracenode *e1, const struct btracenode *e2)
+{
+	return memcmp(e1->backtrace, e2->backtrace, sizeof(e1->backtrace));
+}
+
+RBT_GENERATE(objectshead, objectnode, entry, objectcmp);
+RBT_GENERATE(btraceshead, btracenode, entry, btracecmp);
+
 
 struct malloc_leak {
 	void *f;
@@ -2071,7 +2209,7 @@ struct leaknode {
 	struct malloc_leak d;
 };
 
-static inline int
+static int
 leakcmp(const struct leaknode *e1, const struct leaknode *e2)
 {
 	return e1->d.f < e2->d.f ? -1 : e1->d.f > e2->d.f;
@@ -2112,39 +2250,89 @@ putleakinfo(void *f, size_t sz, int cnt)
 	}
 }
 
-static struct malloc_leak *malloc_leaks;
 
 static void
-dump_leaks(int fd)
+ulog(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
+
+static void
+ulog(const char *format, ...)
 {
+	va_list ap;
+	char buf[100];
+	int len;
+
+	va_start(ap, format);
+	len = vsnprintf(buf, sizeof(buf), format, ap);
+	if (len >= sizeof(buf))
+		len = sizeof(buf);
+	utrace("mallocdumpline", buf, len);
+	va_end(ap);
+}
+
+struct malloc_utrace {
+	struct stackframe backtrace[NUM_FRAMES];
+	size_t sum;
+	size_t count;
+};
+
+static void
+dump_btrace(struct dir_info *d, struct malloc_leak *p)
+{
+	struct btracenode *bt = p->f;
+	struct malloc_utrace u;
+	int i;
+
+	if (bt != NULL) {
+		for (i = 0; i < NUM_FRAMES; i++) {
+			struct objectnode *obj = bt->backtrace[i].object;
+
+			ulog(" %s:%p", obj ? obj->name : "",
+			    bt->backtrace[i].caller);
+			if (bt->backtrace[i].caller == NULL)
+				break;
+		}
+		ulog("\n");
+		memcpy(&u.backtrace, &bt->backtrace, sizeof(u.backtrace));
+		u.sum = p->total_size;
+		u.count = p->count;
+		utrace("mallocleakrecord", &u, sizeof(u));
+		return;
+	}
+	ulog("\n");
+}
+
+struct malloc_object {
+	void *object;
+	char name[100];
+};
+
+static void
+dump_leaks( struct dir_info *d)
+{
+	struct objectnode *obj;
+	struct malloc_object u;
 	struct leaknode *p;
 	int i = 0;
 
-	dprintf(fd, "Leak report\n");
-	dprintf(fd, "                 f     sum      #    avg\n");
-	/* XXX only one page of summary */
-	if (malloc_leaks == NULL)
-		malloc_leaks = MMAP(MALLOC_PAGESIZE, 0);
-	if (malloc_leaks != MAP_FAILED)
-		memset(malloc_leaks, 0, MALLOC_PAGESIZE);
+	RBT_FOREACH(obj, objectshead, &d->objects) {
+		u.object = obj;
+		strlcpy(u.name, obj->name, sizeof(u.name));
+		utrace("mallocobjectrecord", &u, sizeof(u));
+	}
+	ulog("Leak report\n");
+	ulog("                 f     sum      #    avg\n");
 	RBT_FOREACH(p, leaktree, &leakhead) {
-		dprintf(fd, "%18p %7zu %6u %6zu\n", p->d.f,
+		ulog("%18p %7zu %6u %6zu", p->d.f,
 		    p->d.total_size, p->d.count, p->d.total_size / p->d.count);
-		if (malloc_leaks == MAP_FAILED ||
-		    i >= MALLOC_PAGESIZE / sizeof(struct malloc_leak))
-			continue;
-		malloc_leaks[i].f = p->d.f;
-		malloc_leaks[i].total_size = p->d.total_size;
-		malloc_leaks[i].count = p->d.count;
-		i++;
+		dump_btrace(d, &p->d);
 	}
 }
 
 static void
-dump_chunk(int fd, struct chunk_info *p, void *f, int fromfreelist)
+dump_chunk(struct chunk_info *p, void *f, int fromfreelist)
 {
 	while (p != NULL) {
-		dprintf(fd, "chunk %18p %18p %4d %d/%d\n",
+		ulog("chunk %18p %18p %4d %d/%d\n",
 		    p->page, ((p->bits[0] & 1) ? NULL : f),
 		    p->size, p->free, p->total);
 		if (!fromfreelist) {
@@ -2159,17 +2347,17 @@ dump_chunk(int fd, struct chunk_info *p, void *f, int fromfreelist)
 		}
 		p = LIST_NEXT(p, entries);
 		if (p != NULL)
-			dprintf(fd, "        ");
+			ulog("        ");
 	}
 }
 
 static void
-dump_free_chunk_info(int fd, struct dir_info *d)
+dump_free_chunk_info(struct dir_info *d)
 {
 	int i, j, count;
 	struct chunk_info *p;
 
-	dprintf(fd, "Free chunk structs:\n");
+	ulog("Free chunk structs:\n");
 	for (i = 0; i <= MALLOC_MAXSHIFT; i++) {
 		count = 0;
 		LIST_FOREACH(p, &d->chunk_info_list[i], entries)
@@ -2178,80 +2366,80 @@ dump_free_chunk_info(int fd, struct dir_info *d)
 			p = LIST_FIRST(&d->chunk_dir[i][j]);
 			if (p == NULL && count == 0)
 				continue;
-			dprintf(fd, "%2d) %3d ", i, count);
+			ulog("%2d) %3d ", i, count);
 			if (p != NULL)
-				dump_chunk(fd, p, NULL, 1);
+				dump_chunk(p, NULL, 1);
 			else
-				dprintf(fd, "\n");
+				ulog("\n");
 		}
 	}
 
 }
 
 static void
-dump_free_page_info(int fd, struct dir_info *d)
+dump_free_page_info(struct dir_info *d)
 {
 	int i;
 
-	dprintf(fd, "Free pages cached: %zu\n", d->free_regions_size);
+	ulog("Free pages cached: %zu\n", d->free_regions_size);
 	for (i = 0; i < d->malloc_cache; i++) {
 		if (d->free_regions[i].p != NULL) {
-			dprintf(fd, "%2d) ", i);
-			dprintf(fd, "free at %p: %zu\n",
+			ulog("%2d) ", i);
+			ulog("free at %p: %zu\n",
 			    d->free_regions[i].p, d->free_regions[i].size);
 		}
 	}
 }
 
 static void
-malloc_dump1(int fd, int poolno, struct dir_info *d)
+malloc_dump1(int poolno, struct dir_info *d)
 {
 	size_t i, realsize;
 
-	dprintf(fd, "Malloc dir of %s pool %d at %p\n", __progname, poolno, d);
+	ulog("Malloc dir of %s pool %d at %p\n", __progname, poolno, d);
 	if (d == NULL)
 		return;
-	dprintf(fd, "J=%d cache=%u Fl=%x\n",
+	ulog("J=%d cache=%u Fl=%x\n",
 	    d->malloc_junk, d->malloc_cache, d->mmap_flag);
-	dprintf(fd, "Region slots free %zu/%zu\n",
+	ulog("Region slots free %zu/%zu\n",
 		d->regions_free, d->regions_total);
-	dprintf(fd, "Finds %zu/%zu\n", d->finds, d->find_collisions);
-	dprintf(fd, "Inserts %zu/%zu\n", d->inserts, d->insert_collisions);
-	dprintf(fd, "Deletes %zu/%zu\n", d->deletes, d->delete_moves);
-	dprintf(fd, "Cheap reallocs %zu/%zu\n",
+	ulog("Finds %zu/%zu\n", d->finds, d->find_collisions);
+	ulog("Inserts %zu/%zu\n", d->inserts, d->insert_collisions);
+	ulog("Deletes %zu/%zu\n", d->deletes, d->delete_moves);
+	ulog("Cheap reallocs %zu/%zu\n",
 	    d->cheap_reallocs, d->cheap_realloc_tries);
-	dprintf(fd, "Other pool searches %zu/%zu\n",
+	ulog("Other pool searches %zu/%zu\n",
 	    d->other_pool, d->pool_searches);
-	dprintf(fd, "In use %zu\n", d->malloc_used);
-	dprintf(fd, "Guarded %zu\n", d->malloc_guarded);
-	dump_free_chunk_info(fd, d);
-	dump_free_page_info(fd, d);
-	dprintf(fd,
+	ulog("In use %zu\n", d->malloc_used);
+	ulog("Guarded %zu\n", d->malloc_guarded);
+	dump_free_chunk_info(d);
+	dump_free_page_info(d);
+	ulog(
 	    "slot)  hash d  type               page                  f size [free/n]\n");
 	for (i = 0; i < d->regions_total; i++) {
 		if (d->r[i].p != NULL) {
 			size_t h = hash(d->r[i].p) &
 			    (d->regions_total - 1);
-			dprintf(fd, "%4zx) #%4zx %zd ",
+			ulog("%4zx) #%4zx %zd ",
 			    i, h, h - i);
 			REALSIZE(realsize, &d->r[i]);
 			if (realsize > MALLOC_MAXCHUNK) {
 				putleakinfo(d->r[i].f, realsize, 1);
-				dprintf(fd,
+				ulog(
 				    "pages %18p %18p %zu\n", d->r[i].p,
 				    d->r[i].f, realsize);
 			} else
-				dump_chunk(fd,
+				dump_chunk(
 				    (struct chunk_info *)d->r[i].size,
 				    d->r[i].f, 0);
 		}
 	}
-	dump_leaks(fd);
-	dprintf(fd, "\n");
+	dump_leaks(d);
+	ulog("\n");
 }
 
 void
-malloc_dump(int fd, int poolno, struct dir_info *pool)
+malloc_dump(int poolno, struct dir_info *pool)
 {
 	int i;
 	void *p;
@@ -2272,19 +2460,19 @@ malloc_dump(int fd, int poolno, struct dir_info *pool)
 	}
 	/* XXX leak when run multiple times */
 	RBT_INIT(leaktree, &leakhead);
-	malloc_dump1(fd, poolno, pool);
+	malloc_dump1(poolno, pool);
 	errno = saved_errno;
 }
 DEF_WEAK(malloc_dump);
 
 void
-malloc_gdump(int fd)
+malloc_gdump(void)
 {
 	int i;
 	int saved_errno = errno;
 
 	for (i = 0; i < mopts.malloc_mutexes; i++)
-		malloc_dump(fd, i, mopts.malloc_pool[i]);
+		malloc_dump(i, mopts.malloc_pool[i]);
 
 	errno = saved_errno;
 }
@@ -2295,25 +2483,19 @@ malloc_exit(void)
 {
 	int save_errno = errno, fd, i;
 
-	fd = open("malloc.out", O_RDWR|O_APPEND);
-	if (fd != -1) {
-		dprintf(fd, "******** Start dump %s *******\n", __progname);
-		dprintf(fd,
-		    "MT=%d M=%u I=%d F=%d U=%d J=%d R=%d X=%d C=%d cache=%u G=%zu\n",
-		    mopts.malloc_mt, mopts.malloc_mutexes,
-		    mopts.internal_funcs, mopts.malloc_freecheck,
-		    mopts.malloc_freeunmap, mopts.def_malloc_junk,
-		    mopts.malloc_realloc, mopts.malloc_xmalloc,
-		    mopts.chunk_canaries, mopts.def_malloc_cache,
-		    mopts.malloc_guard);
+	ulog("******** Start dump %s *******\n", __progname);
+	ulog(
+	    "MT=%d M=%u I=%d F=%d U=%d J=%d R=%d X=%d C=%d cache=%u G=%zu\n",
+	    mopts.malloc_mt, mopts.malloc_mutexes,
+	    mopts.internal_funcs, mopts.malloc_freecheck,
+	    mopts.malloc_freeunmap, mopts.def_malloc_junk,
+	    mopts.malloc_realloc, mopts.malloc_xmalloc,
+	    mopts.chunk_canaries, mopts.def_malloc_cache,
+	    mopts.malloc_guard);
 
-		for (i = 0; i < mopts.malloc_mutexes; i++)
-			malloc_dump(fd, i, mopts.malloc_pool[i]);
-		dprintf(fd, "******** End dump %s *******\n", __progname);
-		close(fd);
-	} else
-		dprintf(STDERR_FILENO,
-		    "malloc() warning: Couldn't dump stats\n");
+	for (i = 0; i < mopts.malloc_mutexes; i++)
+		malloc_dump(i, mopts.malloc_pool[i]);
+	ulog("******** End dump %s *******\n", __progname);
 	errno = save_errno;
 }
 
