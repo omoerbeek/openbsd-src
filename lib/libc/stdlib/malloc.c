@@ -322,12 +322,6 @@ wrterror(struct dir_info *d, char *msg, ...)
 	vdprintf(STDERR_FILENO, msg, ap);
 	va_end(ap);
 	dprintf(STDERR_FILENO, "\n");
-
-#ifdef MALLOC_STATS
-	if (mopts.malloc_stats)
-		malloc_gdump();
-#endif /* MALLOC_STATS */
-
 	errno = saved_errno;
 
 	abort();
@@ -2103,13 +2097,22 @@ aligned_alloc(size_t alignment, size_t size)
 
 #ifdef MALLOC_STATS
 
+struct malloc_object {
+	void *object;
+	char name[PATH_MAX];
+};
+
 static void *
 objectid(struct dir_info *d, const char *name)
 {
 	struct objectnode key, *p;
+	struct malloc_object u;
 
 	if (d->objectnodes == MAP_FAILED)
-		return NULL;
+		return MAP_FAILED;
+
+	if (name == NULL)
+		name = "";
 
 	strlcpy(key.name, name, sizeof(key.name));
 	p = RBT_FIND(objectshead, &d->objects, &key);
@@ -2120,15 +2123,21 @@ objectid(struct dir_info *d, const char *name)
 	    d->objectnodesused >= MALLOC_PAGESIZE / sizeof(struct objectnode)) {
 		d->objectnodes = MMAP(MALLOC_PAGESIZE, 0);
 		if (d->objectnodes == MAP_FAILED)
-			return NULL;
+			return MAP_FAILED;
 		d->objectnodesused = 0;
 	}
 	p = &d->objectnodes[d->objectnodesused++];
 	strlcpy(p->name, name, sizeof(p->name));
 	RBT_INSERT(objectshead, &d->objects, p);
+
+	u.object = p;
+	strlcpy(u.name, name, sizeof(u.name));
+	utrace("mallocobjectrecord", &u, sizeof(u));
+
 	return p;
 }
 
+#ifdef TRACE_OTS
 static void*
 stackframe(struct dir_info *d, struct stackframe *st, void *caller)
 {
@@ -2137,19 +2146,32 @@ stackframe(struct dir_info *d, struct stackframe *st, void *caller)
 	st->caller = caller;
 	if (caller && dladdr(caller, &info)) {
 		st->caller -= (uintptr_t)info.dli_fbase;
-		st->object = info.dli_fname ? objectid(d, info.dli_fname) :
-		    NULL;
+		st->object = objectid(d, info.dli_fname);
 	} else
 		st->object = NULL;
 	return caller;
 }
 
-#define FRAME(i) do { \
-	if (i < mopts.trace && f) \
-		f = stackframe(d, &key.backtrace[i], __builtin_return_address(i+1)); \
-	else \
+
+#define FRAME(i) do {							\
+	if (i < mopts.trace && f)					\
+		f = stackframe(d, &key.backtrace[i],			\
+		    __builtin_return_address(i + 1));			\
+	else								\
 		memset(&key.backtrace[i], 0, sizeof(key.backtrace[i])); \
 } while (0);
+
+#else
+
+#define FRAME(i) do {							\
+	if (i < mopts.trace && f) {					\
+		f = key.backtrace[i].caller =				\
+		    __builtin_return_address(i + 1);			\
+		key.backtrace[i].object = NULL;				\
+	} else								\
+		memset(&key.backtrace[i], 0, sizeof(key.backtrace[i])); \
+} while (0)
+#endif /* TRACE_OTS */
 		
 
 static void*
@@ -2201,7 +2223,7 @@ RBT_GENERATE(btraceshead, btracenode, entry, btracecmp);
 struct malloc_leak {
 	void *f;
 	size_t total_size;
-	int count;
+	size_t count;
 };
 
 struct leaknode {
@@ -2282,47 +2304,48 @@ dump_btrace(struct dir_info *d, struct malloc_leak *p)
 	struct malloc_utrace u;
 	int i;
 
-	if (bt != NULL) {
-		for (i = 0; i < NUM_FRAMES; i++) {
-			struct objectnode *obj = bt->backtrace[i].object;
-
-			ulog(" %s:%p", obj ? obj->name : "",
-			    bt->backtrace[i].caller);
-			if (bt->backtrace[i].caller == NULL)
-				break;
-		}
+	if (bt == NULL) {
 		ulog("\n");
-		memcpy(&u.backtrace, &bt->backtrace, sizeof(u.backtrace));
-		u.sum = p->total_size;
-		u.count = p->count;
-		utrace("mallocleakrecord", &u, sizeof(u));
 		return;
 	}
+
+	for (i = 0; i < NUM_FRAMES; i++) {
+		struct stackframe *frame = &bt->backtrace[i];
+
+		if (frame->caller == NULL)
+			break;
+
+		if (frame->object == NULL) {
+			Dl_info info;
+
+			if (dladdr(frame->caller, &info)) {
+				frame->caller -= (uintptr_t)info.dli_fbase;
+				frame->object = objectid(d, info.dli_fname);
+			} else
+				frame->object = objectid(d, "");
+		}
+
+		ulog(" %s:%p", frame->object->name, frame->caller);
+	}
+	ulog("\n");
+	memcpy(&u.backtrace, &bt->backtrace, sizeof(u.backtrace));
+	u.sum = p->total_size;
+	u.count = p->count;
+	utrace("mallocleakrecord", &u, sizeof(u));
 	ulog("\n");
 }
-
-struct malloc_object {
-	void *object;
-	char name[100];
-};
 
 static void
 dump_leaks( struct dir_info *d)
 {
 	struct objectnode *obj;
-	struct malloc_object u;
 	struct leaknode *p;
 	int i = 0;
 
-	RBT_FOREACH(obj, objectshead, &d->objects) {
-		u.object = obj;
-		strlcpy(u.name, obj->name, sizeof(u.name));
-		utrace("mallocobjectrecord", &u, sizeof(u));
-	}
 	ulog("Leak report\n");
 	ulog("                 f     sum      #    avg\n");
 	RBT_FOREACH(p, leaktree, &leakhead) {
-		ulog("%18p %7zu %6u %6zu", p->d.f,
+		ulog("%18p %7zu %6zu %6zu", p->d.f,
 		    p->d.total_size, p->d.count, p->d.total_size / p->d.count);
 		dump_btrace(d, &p->d);
 	}

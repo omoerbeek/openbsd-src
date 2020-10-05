@@ -1377,7 +1377,7 @@ struct malloc_utrace {
 
 struct malloc_object {
 	void *object;
-	char name[100];
+	char name[PATH_MAX];
 };
 
 struct objectnode {
@@ -1422,7 +1422,7 @@ addr2line(const char *object, const void *caller, char **name)
 		file[linelen - 1] = '\0';
 	pclose(fp);
 	asprintf(name, "%s%s at %s", function ? function : "??",
-	    strrchr(function, ')') != NULL ? "" : "()",
+	    function && strrchr(function, ')') != NULL ? "" : "()",
 	    file ? file : "??:0");
 	free(function);
 	free(file);
@@ -1459,7 +1459,7 @@ ktruser(struct ktr_user *usr, size_t len)
 
 				key.o.object = p->backtrace[i].object;
 				obj = RBT_FIND(objectshead, &objects, &key);
-				name = obj ? obj->o.name : malloc_object;
+				name = (obj != NULL && obj->o.name[0] != '\0') ? obj->o.name : malloc_object;
 				addr2line(name,
 				    p->backtrace[i].caller, &function);
 				printf(" %s\n", function);
