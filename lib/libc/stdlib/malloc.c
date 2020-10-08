@@ -26,7 +26,6 @@
 #define MALLOC_STATS
 
 #include <sys/types.h>
-#include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
@@ -41,6 +40,7 @@
 
 #ifdef MALLOC_STATS
 #include <sys/tree.h>
+#include <sys/param.h>
 #include <sys/ktrace.h>
 #include <dlfcn.h>
 #endif
@@ -253,10 +253,7 @@ PROTO_NORMAL(malloc_dump);
 void malloc_gdump(void);
 PROTO_NORMAL(malloc_gdump);
 static void malloc_exit(void);
-static void *caller(struct dir_info *);
-#define CALLER(d)	caller(d)
-#else
-#define CALLER(d)	NULL
+static void *caller(struct dir_info *, struct btracenode *);
 #endif
 
 /* low bits of r->p determine size: 0 means >= page size and r->size holding
@@ -1291,15 +1288,41 @@ DEF_STRONG(_malloc_init);
 	if (r != NULL)				\
 		errno = saved_errno;		\
 	
+#define FRAME(i)				\
+	if (i >= mopts.trace) goto done;	\
+	f = __builtin_return_address(i);	\
+	bt.backtrace[i].caller = f;		\
+	if (f == NULL) goto done;		\
+
+#ifdef MALLOC_STATS
+
+#define BACKTRACE				\
+	do {					\
+		struct btracenode bt;		\
+		memset(&bt, 0, sizeof(bt));	\
+		FRAME(0);			\
+		FRAME(1);			\
+		FRAME(2);			\
+		FRAME(3);			\
+done:						\
+		f = caller(d, &bt);		\
+	} while (0)
+#else
+
+#define BACKTRACE	do { f = NULL; } while(0)
+
+#endif	/* MALLOC_STATS */
+
 void *
 malloc(size_t size)
 {
-	void *r;
+	void *r, *f;
 	struct dir_info *d;
 	int saved_errno = errno;
 
 	PROLOGUE(getpool(), "malloc")
-	r = omalloc(d, size, 0, CALLER(d));
+	BACKTRACE;
+	r = omalloc(d, size, 0, f);
 	EPILOGUE()
 	return r;
 }
@@ -1308,12 +1331,13 @@ malloc(size_t size)
 void *
 malloc_conceal(size_t size)
 {
-	void *r;
+	void *r, *f;
 	struct dir_info *d;
 	int saved_errno = errno;
 
 	PROLOGUE(mopts.malloc_pool[0], "malloc_conceal")
-	r = omalloc(d, size, 0, CALLER(d));
+	BACKTRACE;
+	r = omalloc(d, size, 0, f);
 	EPILOGUE()
 	return r;
 }
@@ -1721,11 +1745,12 @@ void *
 realloc(void *ptr, size_t size)
 {
 	struct dir_info *d;
-	void *r;
+	void *r, *f;
 	int saved_errno = errno;
 
 	PROLOGUE(getpool(), "realloc")
-	r = orealloc(&d, ptr, size, CALLER(d));
+	BACKTRACE;
+	r = orealloc(&d, ptr, size, f);
 	EPILOGUE()
 	return r;
 }
@@ -1741,7 +1766,7 @@ void *
 calloc(size_t nmemb, size_t size)
 {
 	struct dir_info *d;
-	void *r;
+	void *r, *f;
 	int saved_errno = errno;
 
 	PROLOGUE(getpool(), "calloc")
@@ -1756,7 +1781,8 @@ calloc(size_t nmemb, size_t size)
 	}
 
 	size *= nmemb;
-	r = omalloc(d, size, 1, CALLER(d));
+	BACKTRACE;
+	r = omalloc(d, size, 1, f);
 	EPILOGUE()
 	return r;
 }
@@ -1766,7 +1792,7 @@ void *
 calloc_conceal(size_t nmemb, size_t size)
 {
 	struct dir_info *d;
-	void *r;
+	void *r, *f;
 	int saved_errno = errno;
 
 	PROLOGUE(mopts.malloc_pool[0], "calloc_conceal")
@@ -1781,7 +1807,8 @@ calloc_conceal(size_t nmemb, size_t size)
 	}
 
 	size *= nmemb;
-	r = omalloc(d, size, 1, CALLER(d));
+	BACKTRACE;
+	r = omalloc(d, size, 1, f);
 	EPILOGUE()
 	return r;
 }
@@ -1898,7 +1925,7 @@ recallocarray(void *ptr, size_t oldnmemb, size_t newnmemb, size_t size)
 {
 	struct dir_info *d;
 	size_t oldsize = 0, newsize;
-	void *r;
+	void *r, *f;
 	int saved_errno = errno;
 
 	if (!mopts.internal_funcs)
@@ -1928,7 +1955,8 @@ recallocarray(void *ptr, size_t oldnmemb, size_t newnmemb, size_t size)
 		oldsize = oldnmemb * size;
 	}
 
-	r = orecallocarray(&d, ptr, oldsize, newsize, CALLER(d));
+	BACKTRACE;
+	r = orecallocarray(&d, ptr, oldsize, newsize, f);
 	EPILOGUE()
 	return r;
 }
@@ -2034,7 +2062,7 @@ posix_memalign(void **memptr, size_t alignment, size_t size)
 {
 	struct dir_info *d;
 	int res, saved_errno = errno;
-	void *r;
+	void *r, *f;
 
 	/* Make sure that alignment is a large enough power of 2. */
 	if (((alignment - 1) & alignment) != 0 || alignment < sizeof(void *))
@@ -2051,7 +2079,8 @@ posix_memalign(void **memptr, size_t alignment, size_t size)
 		malloc_recurse(d);
 		goto err;
 	}
-	r = omemalign(d, alignment, size, 0, CALLER(d));
+	BACKTRACE;
+	r = omemalign(d, alignment, size, 0, f);
 	d->active--;
 	_MALLOC_UNLOCK(d->mutex);
 	if (r == NULL) {
@@ -2075,7 +2104,7 @@ aligned_alloc(size_t alignment, size_t size)
 {
 	struct dir_info *d;
 	int saved_errno = errno;
-	void *r;
+	void *r, *f;
 
 	/* Make sure that alignment is a positive power of 2. */
 	if (((alignment - 1) & alignment) != 0 || alignment == 0) {
@@ -2089,7 +2118,8 @@ aligned_alloc(size_t alignment, size_t size)
 	}
 
 	PROLOGUE(getpool(), "aligned_alloc")
-	r = omemalign(d, alignment, size, 0, CALLER(d));
+	BACKTRACE;
+	r = omemalign(d, alignment, size, 0, f);
 	EPILOGUE()
 	return r;
 }
@@ -2137,58 +2167,15 @@ objectid(struct dir_info *d, const char *name)
 	return p;
 }
 
-#ifdef TRACE_OTS
 static void*
-stackframe(struct dir_info *d, struct stackframe *st, void *caller)
+caller(struct dir_info *d, struct btracenode  *f)
 {
-	Dl_info info;
-
-	st->caller = caller;
-	if (caller && dladdr(caller, &info)) {
-		st->caller -= (uintptr_t)info.dli_fbase;
-		st->object = objectid(d, info.dli_fname);
-	} else
-		st->object = NULL;
-	return caller;
-}
-
-
-#define FRAME(i) do {							\
-	if (i < mopts.trace && f)					\
-		f = stackframe(d, &key.backtrace[i],			\
-		    __builtin_return_address(i + 1));			\
-	else								\
-		memset(&key.backtrace[i], 0, sizeof(key.backtrace[i])); \
-} while (0);
-
-#else
-
-#define FRAME(i) do {							\
-	if (i < mopts.trace && f) {					\
-		f = key.backtrace[i].caller =				\
-		    __builtin_return_address(i + 1);			\
-		key.backtrace[i].object = NULL;				\
-	} else								\
-		memset(&key.backtrace[i], 0, sizeof(key.backtrace[i])); \
-} while (0)
-#endif /* TRACE_OTS */
-		
-
-static void*
-caller(struct dir_info *d)
-{
-	void *f = (void *) 1;
-	struct btracenode key, *p;
+	struct btracenode *p;
 
 	if (mopts.trace == 0 || d->btracenodes == MAP_FAILED)
 		return NULL;
 
-	FRAME(0);
-	FRAME(1);
-	FRAME(2);
-	FRAME(3);
-
-	p = RBT_FIND(btraceshead, &d->btraces, &key);
+	p = RBT_FIND(btraceshead, &d->btraces, f);
 	if (p != NULL)
 		return p;
 	if (d->btracenodes == NULL ||
@@ -2199,7 +2186,7 @@ caller(struct dir_info *d)
 		d->btracenodesused = 0;
 	}
 	p = &d->btracenodes[d->btracenodesused++];
-	memcpy(p->backtrace, key.backtrace, sizeof(p->backtrace));
+	memcpy(p->backtrace, f->backtrace, sizeof(p->backtrace));
 	RBT_INSERT(btraceshead, &d->btraces, p);
 	return p;
 }
@@ -2338,9 +2325,7 @@ dump_btrace(struct dir_info *d, struct malloc_leak *p)
 static void
 dump_leaks( struct dir_info *d)
 {
-	struct objectnode *obj;
 	struct leaknode *p;
-	int i = 0;
 
 	ulog("Leak report\n");
 	ulog("                 f     sum      #    avg\n");
@@ -2504,7 +2489,7 @@ DEF_WEAK(malloc_gdump);
 static void
 malloc_exit(void)
 {
-	int save_errno = errno, fd, i;
+	int save_errno = errno, i;
 
 	ulog("******** Start dump %s *******\n", __progname);
 	ulog(
