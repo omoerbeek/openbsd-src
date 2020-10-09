@@ -390,7 +390,7 @@ objectcmp(const struct objectnode *e1, const struct objectnode *e2)
 	return e1->o.object < e2->o.object ? -1 : e1->o.object > e2->o.object;
 }
 
-RBT_HEAD(objectshead, objectnode) objects = RB_INITIALIZER(&objectnode);
+RBT_HEAD(objectshead, objectnode) objects = RBT_INITIALIZER(&objectnode);
 RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
 RBT_GENERATE(objectshead, objectnode, entry, objectcmp);
 
@@ -414,21 +414,22 @@ ktruser(struct ktr_user *usr, size_t len)
 			printf("%.*s", (int)len, (unsigned char *)(usr + 1));
 	} else if (strcmp(usr->ktr_id, "mallocleakrecord") == 0 &&
 	    len == sizeof(struct malloc_utrace)) {
-		struct malloc_utrace *p = (struct malloc_utrace *)(usr + 1);
+		struct malloc_utrace u;
 		int i;
 
-		printf("Leak sum=%zu count=%zu avg=%zu\n", p->sum, p->count,
-		    p->sum / p->count);
+		memcpy(&u, usr + 1, sizeof(u));
+		printf("Leak sum=%zu count=%zu avg=%zu\n", u.sum, u.count,
+		    u.sum / u.count);
 		for (i = 0; i < NUM_FRAMES; i++) {
-			if (p->backtrace[i].caller) {
+			if (u.backtrace[i].caller) {
 				struct objectnode key, *obj;
 				char *name;
 				char *function;
 
-				key.o.object = p->backtrace[i].object;
+				key.o.object = u.backtrace[i].object;
 				obj = RBT_FIND(objectshead, &objects, &key);
 				name = (obj != NULL && obj->o.name[0] != '\0') ? obj->o.name : malloc_object;
-				addr2line(name, (uintptr_t)p->backtrace[i].
+				addr2line(name, (uintptr_t)u.backtrace[i].
 				    caller, &function);
 				printf(" %s", function);
 				free(function);
@@ -437,15 +438,15 @@ ktruser(struct ktr_user *usr, size_t len)
 		}
 		printf("\n");
 	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 && len == sizeof(struct malloc_object)) {
-		struct malloc_object *p = (struct malloc_object *)(usr + 1);
+		struct malloc_object u;
 		struct objectnode *q;
 
+		memcpy(&u, usr + 1, sizeof(u));
 		q = malloc(sizeof(struct objectnode));
-		q->o.object = p->object;
+		q->o.object = u.object;
 		/* although it should be, better make sure p->name is NUL terminated */
-		p->name[sizeof(p->name) - 1] = '\0';
-		strlcpy(q->o.name, p->name, sizeof(q->o.name));
-		printf("\n ****** LIB %s\n", q->o.name);
+		u.name[sizeof(u.name) - 1] = '\0';
+		strlcpy(q->o.name, u.name, sizeof(q->o.name));
 		RBT_INSERT(objectshead, &objects, q);
 	} else
 		printf("unknown malloc record %s %zu %zu\n", usr->ktr_id,
