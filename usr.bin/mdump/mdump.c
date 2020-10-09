@@ -32,45 +32,20 @@
 #include <sys/param.h>	/* MAXCOMLEN nitems */
 #include <sys/time.h>
 #include <sys/signal.h>
-#include <sys/uio.h>
 #include <sys/ktrace.h>
 #include <sys/ioctl.h>
-#include <sys/malloc.h>
-#include <sys/namei.h>
-#include <sys/ptrace.h>
-#include <sys/sem.h>
-#include <sys/shm.h>
-#include <sys/socket.h>
-#include <sys/sysctl.h>
-#include <sys/siginfo.h>
-#include <sys/vmmeter.h>
-#include <sys/tty.h>
-#include <sys/wait.h>
 #include <sys/tree.h>
-#define PLEDGENAMES
-#include <sys/pledge.h>
-#undef PLEDGENAMES
-#define _KERNEL
-#include <errno.h>
-#undef _KERNEL
-#include <ddb/db_var.h>
-#include <machine/cpu.h>
 
 #include <ctype.h>
 #include <err.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <netdb.h>
-#include <poll.h>
-#include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <vis.h>
-#include <stddef.h>
-
 
 enum {
 	TIMESTAMP_NONE,
@@ -79,16 +54,12 @@ enum {
 	TIMESTAMP_ELAPSED
 } timestamp = TIMESTAMP_NONE;
 
-int decimal, iohex, fancy = 1, maxdata = INT_MAX;
+int decimal, iohex, fancy = 1;
 int needtid, tail, basecol, malloc_trace = 1;
 char *tracefile = "ktrace.out";
 char *malloc_object = "a.out";
 struct ktr_header ktr_header;
 pid_t pid_opt = -1;
-
-#define eqs(s1, s2)	(strcmp((s1), (s2)) == 0)
-
-#include <sys/syscall.h>
 
 static int fread_tail(void *, size_t, size_t);
 static void dumpheader(struct ktr_header *);
@@ -117,7 +88,7 @@ main(int argc, char *argv[])
 			screenwidth = 80;
 	}
 
-	while ((ch = getopt(argc, argv, "e:f:dHlm:Mnp:RTt:xX")) != -1)
+	while ((ch = getopt(argc, argv, "e:f:dHlMnp:RTxX")) != -1)
 		switch (ch) {
 		case 'e':
 			malloc_object = optarg;
@@ -133,11 +104,6 @@ main(int argc, char *argv[])
 			break;
 		case 'l':
 			tail = 1;
-			break;
-		case 'm':
-			maxdata = strtonum(optarg, 0, INT_MAX, &errstr);
-			if (errstr)
-				errx(1, "-m %s: %s", optarg, errstr);
 			break;
 		case 'M':
 			malloc_trace++; 
@@ -294,7 +260,6 @@ dumpheader(struct ktr_header *kth)
  * Base Formatters
  */
 
-
 void
 showbufc(int col, unsigned char *dp, size_t datalen, int flags)
 {
@@ -429,7 +394,7 @@ RBT_HEAD(objectshead, objectnode) objects = RB_INITIALIZER(&objectnode);
 RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
 RBT_GENERATE(objectshead, objectnode, entry, objectcmp);
 
-void addr2line(const char *object, unsigned long long addr, char **name);
+void addr2line(const char *object, uintptr_t addr, char **name);
 
 static void
 ktruser(struct ktr_user *usr, size_t len)
@@ -491,7 +456,7 @@ usage(void)
 
 	extern char *__progname;
 	fprintf(stderr, "usage: %s "
-	    "[-dHlnRTXx] [-f file] [-m maxdata] [-p pid] [-t trstr]\n",
+	    "[-dHlnRTXx] [-e file] [-f file] [-p pid]\n",
 	    __progname);
 	exit(1);
 }

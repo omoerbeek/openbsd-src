@@ -67,21 +67,6 @@ struct CU {
 	Dwarf_Debug dbg;
 };
 
-static struct option longopts[] = {
-	{"addresses", no_argument, NULL, 'a'},
-	{"target" , required_argument, NULL, 'b'},
-	{"demangle", no_argument, NULL, 'C'},
-	{"exe", required_argument, NULL, 'e'},
-	{"functions", no_argument, NULL, 'f'},
-	{"inlines", no_argument, NULL, 'i'},
-	{"section", required_argument, NULL, 'j'},
-	{"pretty-print", no_argument, NULL, 'p'},
-	{"basename", no_argument, NULL, 's'},
-	{"help", no_argument, NULL, 'H'},
-	{"version", no_argument, NULL, 'V'},
-	{NULL, 0, NULL, 0}
-};
-
 static int demangle = 1, func = 1, base, inlines, print_addr, pretty_print = 1;
 static char unknown[] = { '?', '?', '\0' };
 static Dwarf_Addr section_base;
@@ -718,14 +703,13 @@ find_section_base(const char *exe, Elf *e, const char *section)
 }
 
 void
-addr2line(const char *object, unsigned long long addr, char **name)
+addr2line(const char *object, uintptr_t addr, char **name)
 {
 	Elf *e;
 	Dwarf_Debug dbg;
 	Dwarf_Error de;
-	const char *exe, *section;
-	char line[1024];
-	int fd, i, opt;
+	const char *section;
+	int fd;
 	struct CU *cu, *cu0;
 
 	size_t sz = 0;
