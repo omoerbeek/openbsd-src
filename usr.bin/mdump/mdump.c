@@ -436,14 +436,16 @@ ktruser(struct ktr_user *usr, size_t len)
 				break;
 		}
 		printf("\n");
-	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0) {
+	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 && len == sizeof(struct malloc_object)) {
 		struct malloc_object *p = (struct malloc_object *)(usr + 1);
 		struct objectnode *q;
 
 		q = malloc(sizeof(struct objectnode));
 		q->o.object = p->object;
-		/* XXX trusting p->name is zero terminated */
+		/* although it should be, better make sure p->name is NUL terminated */
+		p->name[sizeof(p->name) - 1] = '\0';
 		strlcpy(q->o.name, p->name, sizeof(q->o.name));
+		printf("\n ****** LIB %s\n", q->o.name);
 		RBT_INSERT(objectshead, &objects, q);
 	} else
 		printf("unknown malloc record %s %zu %zu\n", usr->ktr_id,
