@@ -118,7 +118,7 @@ LIST_HEAD(chunk_head, chunk_info);
 #ifdef MALLOC_STATS
 struct objectnode {
 	RBT_ENTRY(objectnode) entry;
-	char name[100];
+	const char *name;
 };
 RBT_HEAD(objectshead, objectnode);
 RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
@@ -162,11 +162,13 @@ struct dir_info {
 	u_char rbytes[32];		/* random bytes */
 #ifdef MALLOC_STATS
 	struct objectshead objects;	/* libs and exec seen */
-	struct btraceshead btraces;	/* libs and exec seen */
-	struct objectnode *objectnodes;
+	struct btraceshead btraces;	/* backtraces seen */
+	struct objectnode *objectnodes;	/* storage of object nodes */
 	size_t objectnodesused;
-	struct btracenode *btracenodes;
+	struct btracenode *btracenodes; /* store of backttrace nodes */
 	size_t btracenodesused;
+	char *objectnames;		/* object paths */
+	size_t objectnamesused;
 	size_t inserts;
 	size_t insert_collisions;
 	size_t finds;
@@ -2137,18 +2139,31 @@ objectid(struct dir_info *d, const char *name)
 {
 	struct objectnode key, *p;
 	struct malloc_object u;
+	char *str;
+	size_t len;
 
-	if (d->objectnodes == MAP_FAILED)
+	if (d->objectnodes == MAP_FAILED || d->objectnames == MAP_FAILED)
 		return MAP_FAILED;
 
 	if (name == NULL)
 		name = "";
 
-	strlcpy(key.name, name, sizeof(key.name));
+	key.name = name;
 	p = RBT_FIND(objectshead, &d->objects, &key);
 	if (p != NULL)
 		return p;
 
+	len = strlen(name) + 1;
+	if (d->objectnames == NULL ||
+	    d->objectnamesused + len >= MALLOC_PAGESIZE) {
+		d->objectnames = MMAP(MALLOC_PAGESIZE, 0);
+		if (d->objectnames == MAP_FAILED)
+			return MAP_FAILED;
+		d->objectnamesused = 0;
+	}
+	str = &d->objectnames[d->objectnamesused];
+	strlcpy(str, name, len);
+	d->objectnamesused += len;
 	if (d->objectnodes == NULL ||
 	    d->objectnodesused >= MALLOC_PAGESIZE / sizeof(struct objectnode)) {
 		d->objectnodes = MMAP(MALLOC_PAGESIZE, 0);
@@ -2157,7 +2172,7 @@ objectid(struct dir_info *d, const char *name)
 		d->objectnodesused = 0;
 	}
 	p = &d->objectnodes[d->objectnodesused++];
-	strlcpy(p->name, name, sizeof(p->name));
+	p->name = str;
 	RBT_INSERT(objectshead, &d->objects, p);
 
 	u.object = p;
