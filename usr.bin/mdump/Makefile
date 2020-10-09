@@ -3,7 +3,8 @@
 PROG=	mdump
 SRCS=	mdump.c addr2line.c
 
-CFLAGS+= -I /usr/local/include/elftoolchain -Wall
+CPPFLAGS+= -I /usr/local/include/elftoolchain
+CFLAGS+= -Wall -g
 
 LDFLAGS+= -L /usr/local/lib/elftoolchain
 LDADD=	-lelftc -ldwarf -lelf
