@@ -25,9 +25,9 @@
  */
 
 #include <sys/param.h>
+#include <sys/queue.h>
 #include <sys/tree.h>
 
-#include <capsicum_helpers.h>
 #include <dwarf.h>
 #include <err.h>
 #include <fcntl.h>
@@ -41,9 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "_elftc.h"
-
-ELFTC_VCSID("$Id: addr2line.c 3499 2016-11-25 16:06:29Z emaste $");
+#include "libelftc.h"
 
 struct Func {
 	char *name;
@@ -54,7 +52,7 @@ struct Func {
 	Dwarf_Ranges *ranges;
 	Dwarf_Signed ranges_cnt;
 	struct Func *inlined_caller;
-	STAILQ_ENTRY(Func) next;
+	TAILQ_ENTRY(Func) next;
 };
 
 struct CU {
@@ -64,7 +62,7 @@ struct CU {
 	Dwarf_Unsigned hipc;
 	char **srcfiles;
 	Dwarf_Signed nsrcfiles;
-	STAILQ_HEAD(, Func) funclist;
+	TAILQ_HEAD(, Func) funclist;
 	Dwarf_Die die;
 	Dwarf_Debug dbg;
 };
@@ -84,12 +82,13 @@ static struct option longopts[] = {
 	{NULL, 0, NULL, 0}
 };
 
-static int demangle, func, base, inlines, print_addr, pretty_print;
+static int demangle = 1, func = 1, base, inlines, print_addr, pretty_print = 1;
 static char unknown[] = { '?', '?', '\0' };
 static Dwarf_Addr section_base;
 /* Need a new curlopc that stores last lopc value. */
-static Dwarf_Unsigned curlopc = ~0ULL;
-static RB_HEAD(cutree, CU) cuhead = RB_INITIALIZER(&cuhead);
+static Dwarf_Unsigned curlopc;
+static RB_HEAD(cutree, CU) cuhead;
+static FILE *stream;
 
 static int
 lopccmp(struct CU *e1, struct CU *e2)
@@ -99,38 +98,6 @@ lopccmp(struct CU *e1, struct CU *e2)
 
 RB_PROTOTYPE(cutree, CU, entry, lopccmp);
 RB_GENERATE(cutree, CU, entry, lopccmp)
-
-#define	USAGE_MESSAGE	"\
-Usage: %s [options] hexaddress...\n\
-  Map program addresses to source file names and line numbers.\n\n\
-  Options:\n\
-  -a      | --addresses       Display address prior to line number info.\n\
-  -b TGT  | --target=TGT      (Accepted but ignored).\n\
-  -e EXE  | --exe=EXE         Use program \"EXE\" to translate addresses.\n\
-  -f      | --functions       Display function names.\n\
-  -i      | --inlines         Display caller info for inlined functions.\n\
-  -j NAME | --section=NAME    Values are offsets into section \"NAME\".\n\
-  -p      | --pretty-print    Display line number info and function name\n\
-                              in human readable manner.\n\
-  -s      | --basename        Only show the base name for each file name.\n\
-  -C      | --demangle        Demangle C++ names.\n\
-  -H      | --help            Print a help message.\n\
-  -V      | --version         Print a version identifier and exit.\n"
-
-static void
-usage(void)
-{
-	(void) fprintf(stderr, USAGE_MESSAGE, ELFTC_GETPROGNAME());
-	exit(1);
-}
-
-static void
-version(void)
-{
-
-	fprintf(stderr, "%s (%s)\n", ELFTC_GETPROGNAME(), elftc_version());
-	exit(0);
-}
 
 /*
  * Handle DWARF 4 'offset from' DW_AT_high_pc.  Although we don't
@@ -179,7 +146,7 @@ search_func(struct CU *cu, Dwarf_Unsigned addr)
 
 	f0 = NULL;
 
-	STAILQ_FOREACH(f, &cu->funclist, next) {
+	TAILQ_FOREACH(f, &cu->funclist, next) {
 		if (f->ranges != NULL) {
 			addr_base = 0;
 			for (i = 0; i < f->ranges_cnt; i++) {
@@ -323,7 +290,7 @@ collect_func(Dwarf_Debug dbg, Dwarf_Die die, struct Func *parent, struct CU *cu)
 			dwarf_attrval_unsigned(die, DW_AT_call_line,
 			    &f->call_line, &de);
 		}
-		STAILQ_INSERT_TAIL(&cu->funclist, f, next);
+		TAILQ_INSERT_TAIL(&cu->funclist, f, next);
 	}
 
 cont_search:
@@ -370,23 +337,23 @@ print_inlines(struct CU *cu, struct Func *f, Dwarf_Unsigned call_file,
 		file = unknown;
 
 	if (pretty_print)
-		printf(" (inlined by) ");
+		fprintf(stream, " (inlined by) ");
 
 	if (func) {
 		if (demangle && !elftc_demangle(f->name, demangled,
 		    sizeof(demangled), 0)) {
 			if (pretty_print)
-				printf("%s at ", demangled);
+				fprintf(stream, "%s at ", demangled);
 			else
-				printf("%s\n", demangled);
+				fprintf(stream, "%s\n", demangled);
 		} else {
 			if (pretty_print)
-				printf("%s at ", f->name);
+				fprintf(stream, "%s at ", f->name);
 			else
-				printf("%s\n", f->name);
+				fprintf(stream, "%s\n", f->name);
 		}
 	}
-	(void) printf("%s:%ju\n", base ? basename(file) : file,
+	fprintf(stream, "%s:%ju\n", base ? basename(file) : file,
 	    (uintmax_t) call_line);
 
 	if (f->inlined_caller != NULL)
@@ -501,7 +468,7 @@ check_range(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Unsigned addr,
 		(*cu)->hipc = hipc;
 		(*cu)->die = die;
 		(*cu)->dbg = dbg;
-		STAILQ_INIT(&(*cu)->funclist);
+		TAILQ_INIT(&(*cu)->funclist);
 		RB_INSERT(cutree, &cuhead, *cu);
 		curlopc = lopc;
 		return (DW_DLV_OK);
@@ -511,13 +478,13 @@ check_range(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Unsigned addr,
 }
 
 static void
-translate(Dwarf_Debug dbg, Elf *e, const char* addrstr)
+translate(Dwarf_Debug dbg, Elf *e, Dwarf_Unsigned addr, char **name)
 {
 	Dwarf_Die die, ret_die;
 	Dwarf_Line *lbuf;
 	Dwarf_Error de;
 	Dwarf_Half tag;
-	Dwarf_Unsigned addr, lineno, plineno;
+	Dwarf_Unsigned lineno, plineno;
 	Dwarf_Signed lcount;
 	Dwarf_Addr lineaddr, plineaddr;
 	struct CU *cu;
@@ -527,7 +494,6 @@ translate(Dwarf_Debug dbg, Elf *e, const char* addrstr)
 	char demangled[1024];
 	int ec, i, ret;
 
-	addr = strtoull(addrstr, NULL, 16);
 	addr += section_base;
 	lineno = 0;
 	file = unknown;
@@ -639,7 +605,7 @@ out:
 			if (dwarf_srcfiles(die, &cu->srcfiles, &cu->nsrcfiles,
 			    &de))
 				warnx("dwarf_srcfiles: %s", dwarf_errmsg(de));
-		if (STAILQ_EMPTY(&cu->funclist)) {
+		if (TAILQ_EMPTY(&cu->funclist)) {
 			collect_func(dbg, die, NULL, cu);
 			die = NULL;
 		}
@@ -655,14 +621,14 @@ out:
 		}
 		if (ec == ELFCLASS32) {
 			if (pretty_print)
-				printf("0x%08jx: ", (uintmax_t) addr);
+				fprintf(stream, "0x%08jx: ", (uintmax_t) addr);
 			else
-				printf("0x%08jx\n", (uintmax_t) addr);
+				fprintf(stream, "0x%08jx\n", (uintmax_t) addr);
 		} else {
 			if (pretty_print)
-				printf("0x%016jx: ", (uintmax_t) addr);
+				fprintf(stream, "0x%016jx: ", (uintmax_t) addr);
 			else
-				printf("0x%016jx\n", (uintmax_t) addr);
+				fprintf(stream, "0x%016jx\n", (uintmax_t) addr);
 		}
 	}
 
@@ -672,18 +638,18 @@ out:
 		if (demangle && !elftc_demangle(funcname, demangled,
 		    sizeof(demangled), 0)) {
 			if (pretty_print)
-				printf("%s at ", demangled);
+				fprintf(stream, "%s at ", demangled);
 			else
-				printf("%s\n", demangled);
+				fprintf(stream, "%s\n", demangled);
 		} else {
 			if (pretty_print)
-				printf("%s at ", funcname);
+				fprintf(stream, "%s at ", funcname);
 			else
-				printf("%s\n", funcname);
+				fprintf(stream, "%s\n", funcname);
 		}
 	}
 
-	(void) printf("%s:%ju\n", base ? basename(file) : file,
+	(void) fprintf(stream, "%s:%ju\n", base ? basename(file) : file,
 	    (uintmax_t) lineno);
 
 	if (ret == DW_DLV_OK && inlines && cu != NULL &&
@@ -751,76 +717,29 @@ find_section_base(const char *exe, Elf *e, const char *section)
 	errx(EXIT_FAILURE, "%s: cannot find section %s", exe, section);
 }
 
-int
-main(int argc, char **argv)
+void
+addr2line(const char *object, unsigned long long addr, char **name)
 {
-	cap_rights_t rights;
 	Elf *e;
 	Dwarf_Debug dbg;
 	Dwarf_Error de;
 	const char *exe, *section;
 	char line[1024];
 	int fd, i, opt;
+	struct CU *cu, *cu0;
 
-	exe = NULL;
+	size_t sz = 0;
+	stream = open_memstream(name, &sz);
+
+	RB_INIT(&cuhead);
+	curlopc = ~0UL;
 	section = NULL;
-	while ((opt = getopt_long(argc, argv, "ab:Ce:fij:psHV", longopts,
-	    NULL)) != -1) {
-		switch (opt) {
-		case 'a':
-			print_addr = 1;
-			break;
-		case 'b':
-			/* ignored */
-			break;
-		case 'C':
-			demangle = 1;
-			break;
-		case 'e':
-			exe = optarg;
-			break;
-		case 'f':
-			func = 1;
-			break;
-		case 'i':
-			inlines = 1;
-			break;
-		case 'j':
-			section = optarg;
-			break;
-		case 'p':
-			pretty_print = 1;
-			break;
-		case 's':
-			base = 1;
-			break;
-		case 'H':
-			usage();
-		case 'V':
-			version();
-		default:
-			usage();
-		}
-	}
 
-	argv += optind;
-	argc -= optind;
+	if (object == NULL)
+		object = "a.out";
 
-	if (exe == NULL)
-		exe = "a.out";
-
-	if ((fd = open(exe, O_RDONLY)) < 0)
-		err(EXIT_FAILURE, "%s", exe);
-
-	if (caph_rights_limit(fd, cap_rights_init(&rights, CAP_FSTAT,
-	    CAP_MMAP_R)) < 0)
-		errx(EXIT_FAILURE, "caph_rights_limit");
-
-	caph_cache_catpages();
-	if (caph_limit_stdio() < 0)
-		errx(EXIT_FAILURE, "failed to limit stdio rights");
-	if (caph_enter() < 0)
-		errx(EXIT_FAILURE, "failed to enter capability mode");
+	if ((fd = open(object, O_RDONLY)) < 0)
+		err(EXIT_FAILURE, "%s", object);
 
 	if (dwarf_init(fd, DW_DLC_READ, NULL, NULL, &dbg, &de))
 		errx(EXIT_FAILURE, "dwarf_init: %s", dwarf_errmsg(de));
@@ -829,22 +748,23 @@ main(int argc, char **argv)
 		errx(EXIT_FAILURE, "dwarf_get_elf: %s", dwarf_errmsg(de));
 
 	if (section)
-		find_section_base(exe, e, section);
+		find_section_base(object, e, section);
 	else
 		section_base = 0;
 
-	if (argc > 0)
-		for (i = 0; i < argc; i++)
-			translate(dbg, e, argv[i]);
-	else {
-		setvbuf(stdout, NULL, _IOLBF, 0);
-		while (fgets(line, sizeof(line), stdin) != NULL)
-			translate(dbg, e, line);
-	}
+	translate(dbg, e, addr, name);
 
 	dwarf_finish(dbg, &de);
 
-	(void) elf_end(e);
+	elf_end(e);
 
-	exit(0);
+	fclose(stream);
+	RB_FOREACH_SAFE(cu, cutree, &cuhead, cu0) {
+		struct Func *f, *f0;
+		TAILQ_FOREACH_SAFE(f, &cu->funclist, next, f0) {
+			free(f->name);
+			free(f);	
+		}
+		free(cu);
+	}
 }
