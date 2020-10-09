@@ -46,7 +46,6 @@
 #include <sys/vmmeter.h>
 #include <sys/tty.h>
 #include <sys/wait.h>
-#include <sys/tree.h>
 #define PLEDGENAMES
 #include <sys/pledge.h>
 #undef PLEDGENAMES
@@ -83,9 +82,8 @@ enum {
 } timestamp = TIMESTAMP_NONE;
 
 int decimal, iohex, fancy = 1, maxdata = INT_MAX;
-int needtid, tail, basecol, malloc_trace;
+int needtid, tail, basecol;
 char *tracefile = DEF_TRACEFILE;
-char *malloc_object = "a.out";
 struct ktr_header ktr_header;
 pid_t pid_opt = -1;
 
@@ -167,11 +165,8 @@ main(int argc, char *argv[])
 			screenwidth = 80;
 	}
 
-	while ((ch = getopt(argc, argv, "e:f:dHlm:Mnp:RTt:xX")) != -1)
+	while ((ch = getopt(argc, argv, "f:dHlm:np:RTt:xX")) != -1)
 		switch (ch) {
-		case 'e':
-			malloc_object = optarg;
-			break;
 		case 'f':
 			tracefile = optarg;
 			break;
@@ -188,10 +183,6 @@ main(int argc, char *argv[])
 			maxdata = strtonum(optarg, 0, INT_MAX, &errstr);
 			if (errstr)
 				errx(1, "-m %s: %s", optarg, errstr);
-			break;
-		case 'M':
-			malloc_trace++; 
-			trpoints = KTRFAC_USER;
 			break;
 		case 'n':
 			fancy = 0;
@@ -230,17 +221,12 @@ main(int argc, char *argv[])
 	if (argc > optind)
 		usage();
 
-	if (malloc_trace == 0) {
-		if (strcmp(tracefile, "-") != 0)
-			if (unveil(tracefile, "r") == -1)
-				err(1, "unveil");
-		if (unveil(_PATH_PROTOCOLS, "r") == -1)
+	if (strcmp(tracefile, "-") != 0)
+		if (unveil(tracefile, "r") == -1)
 			err(1, "unveil");
-	}
-	if (malloc_trace) {
-		if (pledge("stdio rpath getpw proc exec", NULL) == -1)
-			err(1, "pledge");
-	} else if (pledge("stdio rpath getpw", NULL) == -1)
+	if (unveil(_PATH_PROTOCOLS, "r") == -1)
+		err(1, "unveil");
+	if (pledge("stdio rpath getpw", NULL) == -1)
 		err(1, "pledge");
 
 	m = malloc(size = 1025);
@@ -257,19 +243,8 @@ main(int argc, char *argv[])
 		silent = 0;
 		if (pid_opt != -1 && pid_opt != ktr_header.ktr_pid)
 			silent = 1;
-		if (silent == 0 && trpoints & (1<<ktr_header.ktr_type) &&
-		    malloc_trace == 0)
+		if (silent == 0 && trpoints & (1<<ktr_header.ktr_type))
 			dumpheader(&ktr_header);
-		if (malloc_trace  && silent == 0) {
-			static pid_t pid;
-			if (pid)  {
-				if (pid != ktr_header.ktr_pid)
-					errx(1, "-M and multiple pids seen, "
-					    "select one using -p");
-			} else
-				pid = ktr_header.ktr_pid;
-		}
-
 		ktrlen = ktr_header.ktr_len;
 		if (ktrlen > size) {
 			void *newm;
@@ -1363,124 +1338,15 @@ ktrpsig(struct ktr_psig *psig)
 	printf("\n");
 }
 
-struct stackframe {
-	void *caller;
-	void *object;
-};
-
-#define NUM_FRAMES	4
-struct malloc_utrace {
-	struct stackframe backtrace[NUM_FRAMES];
-	size_t sum;
-	size_t count;
-};
-
-struct malloc_object {
-	void *object;
-	char name[PATH_MAX];
-};
-
-struct objectnode {
-	RBT_ENTRY(objectnode) entry;
-	struct malloc_object o;
-};
-
-
-static int
-objectcmp(const struct objectnode *e1, const struct objectnode *e2)
-{
-	return e1->o.object < e2->o.object ? -1 : e1->o.object > e2->o.object;
-}
-
-RBT_HEAD(objectshead, objectnode) objects = RB_INITIALIZER(&objectnode);
-RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
-
-/* BIG XXX trusting object wont attack us */
-static void
-addr2line(const char *object, const void *caller, char **name)
-{
-	FILE *fp ;
-	char command[1000];
-	ssize_t linesize = 0;
-	size_t linelen;
-	char *function = NULL, *file = NULL;
-
-	snprintf(command, sizeof(command), "/usr/bin/addr2line -fCe %s %p",
-		object, caller);
-	fp = popen(command, "r");
-	if (fp == NULL) {
-		asprintf(name, "??" "() at ??:0"); /* avoid trigraoh */
-		return;
-	}
-
-	linelen = getline(&function, &linesize, fp);
-	if (linelen != -1)
-		function[linelen - 1] = '\0';
-	linesize = 0;
-	linelen = getline(&file, &linesize, fp);
-	if (linelen != -1)
-		file[linelen - 1] = '\0';
-	pclose(fp);
-	asprintf(name, "%s%s at %s", function ? function : "??",
-	    function && strrchr(function, ')') != NULL ? "" : "()",
-	    file ? file : "??:0");
-	free(function);
-	free(file);
-}
-
 static void
 ktruser(struct ktr_user *usr, size_t len)
 {
 	if (len < sizeof(struct ktr_user))
 		errx(1, "invalid ktr user length %zu", len);
 	len -= sizeof(struct ktr_user);
-	if (malloc_trace == 0) {
-		printf("%.*s:", KTR_USER_MAXIDLEN, usr->ktr_id);
-		printf(" %zu bytes\n", len);
-		showbuf((unsigned char *)(usr + 1), len);
-		return;
-	}
-
-	if (strcmp(usr->ktr_id, "mallocdumpline") == 0) {
-		if (malloc_trace == 2)
-			printf("%.*s", (int)len, (unsigned char *)(usr + 1));
-	} else if (strcmp(usr->ktr_id, "mallocleakrecord") == 0 &&
-	    len == sizeof(struct malloc_utrace)) {
-		struct malloc_utrace *p = (struct malloc_utrace *)(usr + 1);
-		int i;
-
-		printf("Leak sum=%zu count=%zu avg=%zu\n", p->sum, p->count,
-		    p->sum / p->count);
-		for (i = 0; i < NUM_FRAMES; i++) {
-			if (p->backtrace[i].caller) {
-				struct objectnode key, *obj;
-				char *name;
-				char *function;
-
-				key.o.object = p->backtrace[i].object;
-				obj = RBT_FIND(objectshead, &objects, &key);
-				name = (obj != NULL && obj->o.name[0] != '\0') ? obj->o.name : malloc_object;
-				addr2line(name,
-				    p->backtrace[i].caller, &function);
-				printf(" %s\n", function);
-				free(function);
-			} else
-				break;
-		}
-		printf("\n");
-	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0) {
-		struct malloc_object *p = (struct malloc_object *)(usr + 1);
-		struct objectnode *q;
-
-		/* printf("object: %p %s\n", p->object, p->name); */
-		q = malloc(sizeof(struct objectnode));
-		q->o.object = p->object;
-		/* XXX trusting p->name is zero terminated */
-		strlcpy(q->o.name, p->name, sizeof(q->o.name));
-		RBT_INSERT(objectshead, &objects, q);
-	} else
-		printf("unknown malloc record %s %zu %zu\n", usr->ktr_id,
-		    sizeof(struct malloc_utrace), len);
+	printf("%.*s:", KTR_USER_MAXIDLEN, usr->ktr_id);
+	printf(" %zu bytes\n", len);
+	showbuf((unsigned char *)(usr + 1), len);
 }
 
 static void
