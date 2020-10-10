@@ -124,7 +124,7 @@ RBT_HEAD(objectshead, objectnode);
 RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
 
 struct stackframe {
-	void *caller;
+	char *caller;
 	struct objectnode *object;
 };
 
@@ -2290,7 +2290,7 @@ ulog(const char *format, ...)
 
 	va_start(ap, format);
 	len = vsnprintf(buf, sizeof(buf), format, ap);
-	if (len >= sizeof(buf))
+	if (len >= (int)sizeof(buf))
 		len = sizeof(buf);
 	utrace("mallocdumpline", buf, len);
 	va_end(ap);
@@ -2406,7 +2406,7 @@ dump_free_chunk_info(struct dir_info *d)
 static void
 dump_free_page_info(struct dir_info *d)
 {
-	int i;
+	u_int i;
 
 	ulog("Free pages cached: %zu\n", d->free_regions_size);
 	for (i = 0; i < d->malloc_cache; i++) {
@@ -2473,7 +2473,7 @@ malloc_dump(int poolno, struct dir_info *pool)
 	struct region_info *r;
 	int saved_errno = errno;
 
-	if (pool == NULL)
+	if (pool == NULL || pool->inserts == 0)
 		return;
 	for (i = 0; i < MALLOC_DELAYED_CHUNK_MASK + 1; i++) {
 		p = pool->delayed_chunks[i];
@@ -2493,7 +2493,7 @@ DEF_WEAK(malloc_dump);
 void
 malloc_gdump(void)
 {
-	int i;
+	u_int i;
 	int saved_errno = errno;
 
 	for (i = 0; i < mopts.malloc_mutexes; i++)
@@ -2506,17 +2506,19 @@ DEF_WEAK(malloc_gdump);
 static void
 malloc_exit(void)
 {
-	int save_errno = errno, i;
+	int save_errno = errno;
+	u_int i;
 
 	ulog("******** Start dump %s *******\n", __progname);
 	ulog(
-	    "MT=%d M=%u I=%d F=%d U=%d J=%d R=%d X=%d C=%d cache=%u G=%zu\n",
+	    "MT=%d M=%u I=%d F=%d U=%d J=%d R=%d X=%d C=%d cache=%u G=%zu "
+	    "T=%d\n",
 	    mopts.malloc_mt, mopts.malloc_mutexes,
 	    mopts.internal_funcs, mopts.malloc_freecheck,
 	    mopts.malloc_freeunmap, mopts.def_malloc_junk,
 	    mopts.malloc_realloc, mopts.malloc_xmalloc,
 	    mopts.chunk_canaries, mopts.def_malloc_cache,
-	    mopts.malloc_guard);
+	    mopts.malloc_guard, mopts.trace);
 
 	for (i = 0; i < mopts.malloc_mutexes; i++)
 		malloc_dump(i, mopts.malloc_pool[i]);

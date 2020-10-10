@@ -391,7 +391,7 @@ objectcmp(const struct objectnode *e1, const struct objectnode *e2)
 }
 
 RBT_HEAD(objectshead, objectnode) objects = RBT_INITIALIZER(&objectnode);
-RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
+RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp)
 RBT_GENERATE(objectshead, objectnode, entry, objectcmp);
 
 void addr2line(const char *object, uintptr_t addr, char **name);
