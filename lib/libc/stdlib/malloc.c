@@ -114,7 +114,6 @@ struct region_info {
 
 LIST_HEAD(chunk_head, chunk_info);
 
-
 #ifdef MALLOC_STATS
 
 struct objectnode {
@@ -247,9 +246,9 @@ struct malloc_readonly {
 	u_int	chunk_canaries;		/* use canaries after chunks? */
 	int	internal_funcs;		/* use better recallocarray/freezero? */
 	u_int	def_malloc_cache;	/* free pages we cache */
-	int	trace;			/* are we tracing? */
 	size_t	malloc_guard;		/* use guard pages after allocations? */
 #ifdef MALLOC_STATS
+	int	trace;			/* are we tracing? */
 	int	malloc_stats;		/* dump statistics at end */
 #endif
 	u_int32_t malloc_canary;	/* Matched against ones in malloc_pool */
@@ -427,12 +426,14 @@ omalloc_parseopt(char opt)
 	case 'R':
 		mopts.malloc_realloc = 1;
 		break;
+#ifdef MALLOC_STATS
 	case 't':
 		mopts.trace = 0;
 		break;
 	case 'T':
 		mopts.trace++;
 		break;
+#endif
 	case 'u':
 		mopts.malloc_freeunmap = 0;
 		break;
@@ -1309,13 +1310,13 @@ DEF_STRONG(_malloc_init);
 	if (r != NULL)				\
 		errno = saved_errno;		\
 	
+#ifdef MALLOC_STATS
+
 #define FRAME(i)				\
 	if (i >= mopts.trace) goto done;	\
 	f = __builtin_return_address(i);	\
 	bt.backtrace[i].caller = f;		\
 	if (f == NULL) goto done;		\
-
-#ifdef MALLOC_STATS
 
 #define BACKTRACE(f)				\
 	do {					\
@@ -1330,7 +1331,7 @@ done:						\
 	} while (0)
 #else
 
-#define BACKTRACE	do { (f) = NULL; } while(0)
+#define BACKTRACE(f)	do { (f) = NULL; } while(0)
 
 #endif	/* MALLOC_STATS */
 
