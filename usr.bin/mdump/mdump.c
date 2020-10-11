@@ -57,7 +57,7 @@ enum {
 int decimal, iohex, fancy = 1;
 int needtid, tail, basecol, malloc_trace = 1;
 char *tracefile = "ktrace.out";
-char *malloc_object = "a.out";
+char *malloc_aout = "a.out";
 struct ktr_header ktr_header;
 pid_t pid_opt = -1;
 
@@ -66,6 +66,7 @@ static void dumpheader(struct ktr_header *);
 
 static void ktruser(struct ktr_user *, size_t);
 static void usage(void);
+static void *xmalloc(size_t);
 
 static int screenwidth;
 
@@ -88,10 +89,10 @@ main(int argc, char *argv[])
 			screenwidth = 80;
 	}
 
-	while ((ch = getopt(argc, argv, "e:f:dHlMnp:RTxX")) != -1)
+	while ((ch = getopt(argc, argv, "e:f:dHlnp:RTvxX")) != -1)
 		switch (ch) {
 		case 'e':
-			malloc_object = optarg;
+			malloc_aout = optarg;
 			break;
 		case 'f':
 			tracefile = optarg;
@@ -104,9 +105,6 @@ main(int argc, char *argv[])
 			break;
 		case 'l':
 			tail = 1;
-			break;
-		case 'M':
-			malloc_trace++; 
 			break;
 		case 'n':
 			fancy = 0;
@@ -128,6 +126,9 @@ main(int argc, char *argv[])
 			else
 				timestamp = TIMESTAMP_ABSOLUTE;
 			break;
+		case 'v':
+			malloc_trace++; 
+			break;
 		case 'x':
 			iohex = 1;
 			break;
@@ -143,9 +144,7 @@ main(int argc, char *argv[])
 	if (pledge("stdio rpath getpw", NULL) == -1)
 		err(1, "pledge");
 
-	m = malloc(size = 1025);
-	if (m == NULL)
-		err(1, NULL);
+	m = xmalloc(size = 1025);
 	if (strcmp(tracefile, "-") != 0)
 		if (!freopen(tracefile, "r", stdin))
 			err(1, "%s", tracefile);
@@ -375,19 +374,20 @@ struct malloc_utrace {
 
 struct malloc_object {
 	void *object;
-	char name[PATH_MAX];
+	char name[0];
 };
 
 struct objectnode {
 	RBT_ENTRY(objectnode) entry;
-	struct malloc_object o;
+	struct malloc_object *o;
 };
 
 
 static int
 objectcmp(const struct objectnode *e1, const struct objectnode *e2)
 {
-	return e1->o.object < e2->o.object ? -1 : e1->o.object > e2->o.object;
+	return e1->o->object < e2->o->object ? -1 :
+	    e1->o->object > e2->o->object;
 }
 
 RBT_HEAD(objectshead, objectnode) objects = RBT_INITIALIZER(&objectnode);
@@ -426,31 +426,43 @@ ktruser(struct ktr_user *usr, size_t len)
 				char *name;
 				char *function;
 
-				key.o.object = u.backtrace[i].object;
+				key.o = xmalloc(sizeof(struct objectnode));
+				key.o->object = u.backtrace[i].object;
 				obj = RBT_FIND(objectshead, &objects, &key);
-				name = (obj != NULL && obj->o.name[0] != '\0') ? obj->o.name : malloc_object;
+				name = (obj != NULL && obj->o != NULL &&
+				    obj->o->name[0] != '\0') ? obj->o->name :
+				    malloc_aout;
 				addr2line(name, (uintptr_t)u.backtrace[i].
 				    caller, &function);
 				printf(" %s", function);
+				free(key.o);
 				free(function);
 			} else
 				break;
 		}
 		printf("\n");
-	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 && len == sizeof(struct malloc_object)) {
-		struct malloc_object u;
-		struct objectnode *q;
+	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 &&
+	    len > sizeof(struct malloc_object) && len < sizeof(struct malloc_object) + PATH_MAX) {
+		union {
+			struct malloc_object m;
+			char data[sizeof(struct malloc_object) + PATH_MAX];
+		} u;
+		struct objectnode *p;
 
-		memcpy(&u, usr + 1, sizeof(u));
-		q = malloc(sizeof(struct objectnode));
-		q->o.object = u.object;
-		/* although it should be, better make sure p->name is NUL terminated */
-		u.name[sizeof(u.name) - 1] = '\0';
-		strlcpy(q->o.name, u.name, sizeof(q->o.name));
-		RBT_INSERT(objectshead, &objects, q);
+		memcpy(&u, usr + 1, len);
+		/* it should be, better make sure p->name is NUL terminated */
+		u.data[sizeof(u.data) - 1] = '\0';
+		p = xmalloc(sizeof(struct objectnode));
+		p->o = xmalloc(len);
+		p->o->object = u.m.object;
+		if (strlen(u.m.name) != len - sizeof(struct malloc_object)- 1)
+			errx(1, "XXXX %zu %zu", strlen(u.m.name), len);
+		strlcpy(p->o->name, u.m.name,
+		    len - sizeof(struct malloc_object));
+		RBT_INSERT(objectshead, &objects, p);
 	} else
-		printf("unknown malloc record %s %zu %zu\n", usr->ktr_id,
-		    sizeof(struct malloc_utrace), len);
+		printf("unknown malloc record %*.s %zu\n", KTR_USER_MAXIDLEN,
+		    usr->ktr_id, len);
 }
 
 static void
@@ -459,7 +471,18 @@ usage(void)
 
 	extern char *__progname;
 	fprintf(stderr, "usage: %s "
-	    "[-dHlnRTXx] [-e file] [-f file] [-p pid]\n",
+	    "[-dHlnRTvXx] [-e file] [-f file] [-p pid]\n",
 	    __progname);
 	exit(1);
 }
+
+static void *
+xmalloc(size_t sz)
+{
+	void *p = malloc(sz);
+
+	if (p == NULL)
+		err(1, NULL);
+	return p;
+}
+

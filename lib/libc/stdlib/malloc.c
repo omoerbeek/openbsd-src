@@ -2151,14 +2151,17 @@ aligned_alloc(size_t alignment, size_t size)
 
 struct malloc_object {
 	void *object;
-	char name[PATH_MAX];
+	char name[0];
 };
 
 static void *
 objectid(struct dir_info *d, const char *name)
 {
 	struct objectnode key, *p;
-	struct malloc_object u;
+	union {
+		struct malloc_object m;
+		char data[sizeof(struct malloc_object) + PATH_MAX];
+	} u;
 	char *str;
 	size_t len;
 
@@ -2195,9 +2198,9 @@ objectid(struct dir_info *d, const char *name)
 	p->name = str;
 	RBT_INSERT(objectshead, &d->objects, p);
 
-	u.object = p;
-	strlcpy(u.name, name, sizeof(u.name));
-	utrace("mallocobjectrecord", &u, sizeof(u));
+	u.m.object = p;
+	strlcpy(u.m.name, name, PATH_MAX);
+	utrace("mallocobjectrecord", &u, sizeof(struct malloc_object) + len);
 
 	return p;
 }
