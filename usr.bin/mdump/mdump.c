@@ -1,6 +1,7 @@
 /*	$OpenBSD: kdump.c,v 1.143 2020/04/05 08:32:14 mpi Exp $	*/
 
 /*-
+   Copyright (c) 2020 Otto Moerbeek <otto@drijf.net>
  * Copyright (c) 1988, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -442,7 +443,8 @@ ktruser(struct ktr_user *usr, size_t len)
 		}
 		printf("\n");
 	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 &&
-	    len > sizeof(struct malloc_object) && len < sizeof(struct malloc_object) + PATH_MAX) {
+	    len > sizeof(struct malloc_object) &&
+	    len <= sizeof(struct malloc_object) + PATH_MAX) {
 		union {
 			struct malloc_object m;
 			char data[sizeof(struct malloc_object) + PATH_MAX];
@@ -451,12 +453,12 @@ ktruser(struct ktr_user *usr, size_t len)
 
 		memcpy(&u, usr + 1, len);
 		/* it should be, better make sure p->name is NUL terminated */
-		u.data[sizeof(u.data) - 1] = '\0';
+		u.data[len - 1] = '\0';
+		if (strlen(u.m.name) + 1 != len - sizeof(struct malloc_object))
+			errx(1, "internal error");
 		p = xmalloc(sizeof(struct objectnode));
 		p->o = xmalloc(len);
 		p->o->object = u.m.object;
-		if (strlen(u.m.name) != len - sizeof(struct malloc_object)- 1)
-			errx(1, "XXXX %zu %zu", strlen(u.m.name), len);
 		strlcpy(p->o->name, u.m.name,
 		    len - sizeof(struct malloc_object));
 		RBT_INSERT(objectshead, &objects, p);

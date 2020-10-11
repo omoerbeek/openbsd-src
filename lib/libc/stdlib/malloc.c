@@ -1,6 +1,6 @@
 /*	$OpenBSD: malloc.c,v 1.266 2020/10/12 22:08:33 deraadt Exp $	*/
 /*
- * Copyright (c) 2008, 2010, 2011, 2016 Otto Moerbeek <otto@drijf.net>
+ * Copyright (c) 2008, 2010, 2011, 2016, 2020 Otto Moerbeek <otto@drijf.net>
  * Copyright (c) 2012 Matthew Dempsky <matthew@openbsd.org>
  * Copyright (c) 2008 Damien Miller <djm@openbsd.org>
  * Copyright (c) 2000 Poul-Henning Kamp <phk@FreeBSD.org>

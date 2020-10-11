@@ -1,4 +1,5 @@
 /*-
+ * Copyright (c) 2020 Otto Moerbeek <otto@drijf.net>
  * Copyright (c) 2009 Kai Wang
  * All rights reserved.
  *
@@ -664,7 +665,7 @@ find_section_base(const char *exe, Elf *e, const char *section)
 		return;
 	}
 
-	(void) elf_errno();
+	elf_errno();
 	off = 0;
 	scn = NULL;
 	while ((scn = elf_nextscn(e, scn)) != NULL) {
@@ -712,8 +713,10 @@ addr2line(const char *object, uintptr_t addr, char **name)
 	int fd;
 	struct CU *cu, *cu0;
 
-	size_t sz = 0;
+	size_t sz;
 	stream = open_memstream(name, &sz);
+	if (stream == NULL)
+		err(1, NULL);
 
 	RB_INIT(&cuhead);
 	curlopc = ~0UL;
