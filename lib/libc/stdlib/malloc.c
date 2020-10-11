@@ -123,15 +123,17 @@ struct objectnode {
 RBT_HEAD(objectshead, objectnode);
 RBT_PROTOTYPE(objectshead, objectnode, entry, objectcmp);
 
+#define NUM_FRAMES	4
+
 struct stackframe {
-	char *caller;
+	const char *caller;
 	struct objectnode *object;
 };
+typedef struct stackframe stackframes[NUM_FRAMES];
 
-#define NUM_FRAMES	4
 struct btracenode {
 	RBT_ENTRY(btracenode) entry;
-	struct stackframe backtrace[NUM_FRAMES];
+	const char *caller[NUM_FRAMES];
 };
 RBT_HEAD(btraceshead, btracenode);
 RBT_PROTOTYPE(btraceshead, btracenode, entry, btracecmp);
@@ -1315,7 +1317,7 @@ DEF_STRONG(_malloc_init);
 #define FRAME(i)				\
 	if (i >= mopts.trace) goto done;	\
 	f = __builtin_return_address(i);	\
-	bt.backtrace[i].caller = f;		\
+	bt.caller[i] = f;			\
 	if (f == NULL) goto done;		\
 
 #define BACKTRACE(f)				\
@@ -2224,7 +2226,7 @@ caller(struct dir_info *d, struct btracenode  *f)
 		d->btracenodesused = 0;
 	}
 	p = &d->btracenodes[d->btracenodesused++];
-	memcpy(p->backtrace, f->backtrace, sizeof(p->backtrace));
+	memcpy(p->caller, f->caller, sizeof(p->caller));
 	RBT_INSERT(btraceshead, &d->btraces, p);
 	return p;
 }
@@ -2238,7 +2240,7 @@ objectcmp(const struct objectnode *e1, const struct objectnode *e2)
 static int
 btracecmp(const struct btracenode *e1, const struct btracenode *e2)
 {
-	return memcmp(e1->backtrace, e2->backtrace, sizeof(e1->backtrace));
+	return memcmp(e1->caller, e2->caller, sizeof(e1->caller));
 }
 
 static int
@@ -2300,7 +2302,7 @@ ulog(const char *format, ...)
 }
 
 struct malloc_utrace {
-	struct stackframe backtrace[NUM_FRAMES];
+	stackframes backtrace;
 	size_t sum;
 	size_t count;
 };
@@ -2310,6 +2312,7 @@ dump_btrace(struct dir_info *d, struct leakstats *p)
 {
 	struct btracenode *bt = p->f;
 	struct malloc_utrace u;
+	Dl_info info;
 	int i;
 
 	if (bt == NULL) {
@@ -2317,26 +2320,24 @@ dump_btrace(struct dir_info *d, struct leakstats *p)
 		return;
 	}
 
+	memset(&u, 0, sizeof(u));
 	for (i = 0; i < NUM_FRAMES; i++) {
-		struct stackframe *frame = &bt->backtrace[i];
+		const char *caller = bt->caller[i];
+		struct stackframe *frame = &u.backtrace[i];
 
-		if (frame->caller == NULL)
+		if (caller == NULL)
 			break;
 
-		if (frame->object == NULL) {
-			Dl_info info;
-
-			if (dladdr(frame->caller, &info)) {
-				frame->caller -= (uintptr_t)info.dli_fbase;
-				frame->object = objectid(d, info.dli_fname);
-			} else
-				frame->object = objectid(d, "");
+		if (dladdr(caller, &info)) {
+			frame->caller = caller - (uintptr_t)info.dli_fbase;
+			frame->object = objectid(d, info.dli_fname);
+		} else {
+			frame->caller = caller;
+			frame->object = objectid(d, "");
 		}
-
 		ulog(" %s:%p", frame->object->name, frame->caller);
 	}
 	ulog("\n");
-	memcpy(&u.backtrace, &bt->backtrace, sizeof(u.backtrace));
 	u.sum = p->total_size;
 	u.count = p->count;
 	utrace("mallocleakrecord", &u, sizeof(u));
