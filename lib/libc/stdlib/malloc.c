@@ -2341,7 +2341,6 @@ dump_btrace(struct dir_info *d, struct leakstats *p)
 	u.sum = p->total_size;
 	u.count = p->count;
 	utrace("mallocleakrecord", &u, sizeof(u));
-	ulog("\n");
 }
 
 static void

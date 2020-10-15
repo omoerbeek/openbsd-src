@@ -56,14 +56,13 @@ enum {
 } timestamp = TIMESTAMP_NONE;
 
 int decimal, iohex, fancy = 1;
-int needtid, tail, basecol, malloc_trace = 1;
+int needtid, tail, basecol, dump;
 char *tracefile = "ktrace.out";
 char *malloc_aout = "a.out";
 struct ktr_header ktr_header;
 pid_t pid_opt = -1;
 
 static int fread_tail(void *, size_t, size_t);
-static void dumpheader(struct ktr_header *);
 
 static void ktruser(struct ktr_user *, size_t);
 static void usage(void);
@@ -90,7 +89,7 @@ main(int argc, char *argv[])
 			screenwidth = 80;
 	}
 
-	while ((ch = getopt(argc, argv, "e:f:dHlnp:RTvxX")) != -1)
+	while ((ch = getopt(argc, argv, "e:f:dDHlnp:RTxX")) != -1)
 		switch (ch) {
 		case 'e':
 			malloc_aout = optarg;
@@ -100,6 +99,9 @@ main(int argc, char *argv[])
 			break;
 		case 'd':
 			decimal = 1;
+			break;
+		case 'D':
+			dump = 1; 
 			break;
 		case 'H':
 			needtid = 1;
@@ -126,9 +128,6 @@ main(int argc, char *argv[])
 				timestamp = TIMESTAMP_ELAPSED;
 			else
 				timestamp = TIMESTAMP_ABSOLUTE;
-			break;
-		case 'v':
-			malloc_trace++; 
 			break;
 		case 'x':
 			iohex = 1;
@@ -157,10 +156,7 @@ main(int argc, char *argv[])
 		silent = 0;
 		if (pid_opt != -1 && pid_opt != ktr_header.ktr_pid)
 			silent = 1;
-		if (silent == 0 && trpoints & (1<<ktr_header.ktr_type) &&
-		    malloc_trace == 0)
-			dumpheader(&ktr_header);
-		if (malloc_trace  && silent == 0) {
+		if (silent == 0) {
 			static pid_t pid;
 			if (pid)  {
 				if (pid != ktr_header.ktr_pid)
@@ -214,48 +210,6 @@ fread_tail(void *buf, size_t size, size_t num)
 	return (i);
 }
 
-static void
-dumpheader(struct ktr_header *kth)
-{
-	static struct timespec prevtime;
-	char unknown[64], *type;
-	struct timespec temp;
-
-	switch (kth->ktr_type) {
-	case KTR_USER:
-		type = "USER";
-		break;
-	default:
-		/* htobe32() not guaranteed to work as case label */
-		if (kth->ktr_type == htobe32(KTR_START)) {
-			type = "STRT";
-			break;
-		}
-		(void)snprintf(unknown, sizeof unknown, "UNKNOWN(%u)",
-		    kth->ktr_type);
-		type = unknown;
-	}
-
-	basecol = printf("%6ld", (long)kth->ktr_pid);
-	if (needtid)
-		basecol += printf("/%-7ld", (long)kth->ktr_tid);
-	basecol += printf(" %-8.*s ", MAXCOMLEN, kth->ktr_comm);
-	if (timestamp != TIMESTAMP_NONE) {
-		if (timestamp == TIMESTAMP_ELAPSED) {
-			if (prevtime.tv_sec == 0)
-				prevtime = kth->ktr_time;
-			timespecsub(&kth->ktr_time, &prevtime, &temp);
-		} else if (timestamp == TIMESTAMP_RELATIVE) {
-			timespecsub(&kth->ktr_time, &prevtime, &temp);
-			prevtime = kth->ktr_time;
-		} else
-			temp = kth->ktr_time;
-		basecol += printf("%lld.%06ld ", (long long)temp.tv_sec,
-		    temp.tv_nsec / 1000);
-	}
-	basecol += printf("%s  ", type);
-}
-
 /*
  * Base Formatters
  */
@@ -306,61 +260,6 @@ showbufc(int col, unsigned char *dp, size_t datalen, int flags)
 	(void)printf("\"\n");
 }
 
-static void
-showbuf(unsigned char *dp, size_t datalen)
-{
-	int i, j;
-	int col = 0, bpl;
-	unsigned char c;
-
-	if (iohex == 1) {
-		putchar('\t');
-		col = 8;
-		for (i = 0; i < datalen; i++) {
-			printf("%02x", dp[i]);
-			col += 3;
-			if (i < datalen - 1) {
-				if (col + 3 > screenwidth) {
-					printf("\n\t");
-					col = 8;
-				} else
-					putchar(' ');
-			}
-		}
-		putchar('\n');
-		return;
-	}
-	if (iohex == 2) {
-		bpl = (screenwidth - 13)/4;
-		if (bpl <= 0)
-			bpl = 1;
-		for (i = 0; i < datalen; i += bpl) {
-			printf("   %04x:  ", i);
-			for (j = 0; j < bpl; j++) {
-				if (i+j >= datalen)
-					printf("   ");
-				else
-					printf("%02x ", dp[i+j]);
-			}
-			putchar(' ');
-			for (j = 0; j < bpl; j++) {
-				if (i+j >= datalen)
-					break;
-				c = dp[i+j];
-				if (!isprint(c))
-					c = '.';
-				putchar(c);
-			}
-			putchar('\n');
-		}
-		return;
-	}
-
-	(void)printf("       ");
-	showbufc(7, dp, datalen, 0);
-}
-
-
 struct stackframe {
 	void *caller;
 	void *object;
@@ -403,17 +302,17 @@ ktruser(struct ktr_user *usr, size_t len)
 	if (len < sizeof(struct ktr_user))
 		errx(1, "invalid ktr user length %zu", len);
 	len -= sizeof(struct ktr_user);
-	if (malloc_trace == 0) {
-		printf("%.*s:", KTR_USER_MAXIDLEN, usr->ktr_id);
-		printf(" %zu bytes\n", len);
-		showbuf((unsigned char *)(usr + 1), len);
+
+	if (dump == 1) {
+		if (strcmp(usr->ktr_id, "mallocdumpline") == 0)
+			printf("%.*s", (int)len, (unsigned char *)(usr + 1));
 		return;
 	}
 
-	if (strcmp(usr->ktr_id, "mallocdumpline") == 0) {
-		if (malloc_trace == 2)
-			printf("%.*s", (int)len, (unsigned char *)(usr + 1));
-	} else if (strcmp(usr->ktr_id, "mallocleakrecord") == 0 &&
+	if (strcmp(usr->ktr_id, "mallocdumpline") == 0)
+		return;
+
+	if (strcmp(usr->ktr_id, "mallocleakrecord") == 0 &&
 	    len == sizeof(struct malloc_utrace)) {
 		struct malloc_utrace u;
 		int i;
@@ -442,7 +341,10 @@ ktruser(struct ktr_user *usr, size_t len)
 				break;
 		}
 		printf("\n");
-	} else if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 &&
+		return;
+	}
+
+	if (strcmp(usr->ktr_id, "mallocobjectrecord") == 0 &&
 	    len > sizeof(struct malloc_object) &&
 	    len <= sizeof(struct malloc_object) + PATH_MAX) {
 		union {
@@ -462,9 +364,11 @@ ktruser(struct ktr_user *usr, size_t len)
 		strlcpy(p->o->name, u.m.name,
 		    len - sizeof(struct malloc_object));
 		RBT_INSERT(objectshead, &objects, p);
-	} else
-		printf("unknown malloc record %*.s %zu\n", KTR_USER_MAXIDLEN,
-		    usr->ktr_id, len);
+		return;
+	}
+
+	printf("unknown malloc record %*.s %zu\n", KTR_USER_MAXIDLEN,
+	    usr->ktr_id, len);
 }
 
 static void
@@ -473,7 +377,7 @@ usage(void)
 
 	extern char *__progname;
 	fprintf(stderr, "usage: %s "
-	    "[-dHlnRTvXx] [-e file] [-f file] [-p pid]\n",
+	    "[-dHDlnRTXx] [-e file] [-f file] [-p pid]\n",
 	    __progname);
 	exit(1);
 }
