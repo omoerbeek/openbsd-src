@@ -1,6 +1,5 @@
 #	$OpenBSD: Makefile,v 1.136 2020/04/05 20:14:14 deraadt Exp $
 
-# XXXXX 
 #
 # For more information on building in tricky environments, please see
 # the list of possible environment variables described in
